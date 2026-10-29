@@ -1,14 +1,14 @@
 /**
  * Web & Haber Linki Çekici ve Akıllı Ana Metin Ayıklayıcı (Smart Article Distiller)
  *
- * Chrome Okuma Modu (DOM Distiller) ve Mozilla Readability prensipleriyle çalışır:
- * 1. Sayfa başındaki döviz/piyasa bantlarını, paylaşım butonlarını ve tanıtım sloganlarını eler.
- * 2. Yazı sonundaki yazar imzasını ("Tüm yazıları için tıklayın"), sponsorlu reklamları
- *    (Taboola, Outbrain, RejuvaCare vb.), ilgili haber listelerini ve site alt bilgilerini (footer)
- *    kesin sınırla (cutoff) kesip atar.
- * 3. Ara başlıkları ("Bir 'Tek Adam' daha sandığa gömüldü!" vb.) otomatik tanır ve vurgular.
- * 4. Yapışık markdown hatalarını ("**Yarın**Cumhuriyet" -> "Yarın Cumhuriyet") ve tipografiyi onarır.
- * 5. Çok katmanlı CORS proxy ve dinamik SPA siteleri için Jina Reader desteği sunar.
+ * Chrome Okuma Modu (DOM Distiller) ve Mozilla Readability mimarisi:
+ * 1. Sayfa başındaki tüm borsa, menü, sosyal medya ve yazar galerilerini doğrudan eler.
+ * 2. Makalenin ana H1 başlığını bularak öncesindeki tüm HTML/Markdown navigasyonunu keser.
+ * 3. Yazar adını (byline) tespit eder.
+ * 4. Yazı bittiği anda (yazar imzası "Tüm yazıları için tıklayın", sponsorlu reklamlar,
+ *    Outbrain, Taboola, alt bilgi / footer) derhal okumayı sonlandırır (cutoff).
+ * 5. Ara başlıkları ("Bir 'Tek Adam' daha sandığa gömüldü!" vb.) otomatik tanır ve vurgular.
+ * 6. Yapışık markdown hatalarını ("**Yarın**Cumhuriyet" -> "Yarın Cumhuriyet") ve tipografiyi onarır.
  */
 
 export type ExtractedArticle = {
@@ -18,7 +18,7 @@ export type ExtractedArticle = {
   wordCount: number
 }
 
-// 1. Sayfa başındaki döviz, borsa, sosyal paylaşım ve tanıtım kalıpları
+// Sayfa başındaki döviz, borsa, sosyal paylaşım ve tanıtım kalıpları
 const PRE_ARTICLE_NOISE_PATTERNS = [
   // Döviz, Altın, Kripto, Borsa, Faiz bantları
   /(dolar|euro|sterlin|bitcoin|altın|faiz|bist|borsa|parite|gümüş|kripto)\s*[:\s]?\s*\d+[,.]\d+/i,
@@ -40,7 +40,7 @@ const PRE_ARTICLE_NOISE_PATTERNS = [
   /^(daha\s+fazla\s+bilgi\s+al|tıkla\s+öğren|abone\s+ol|tıklayın|uygulamayı\s+indir|son\s+dakika)$/i,
 ]
 
-// 2. Makale bitişini (Cutoff) belirleyen kalıplar (Görüldüğü an makale sona erer!)
+// Makale bitişini (Cutoff) belirleyen kalıplar (Görüldüğü an makale sona erer!)
 const POST_ARTICLE_CUTOFF_PATTERNS = [
   // Yazar imzası / arşiv linki
   /tüm\s+yazıları\s+için\s+tıklayın/i,
@@ -84,7 +84,7 @@ const POST_ARTICLE_CUTOFF_PATTERNS = [
   /all\s+rights\s+reserved/i,
 ]
 
-// 3. Paragraf aralarına sıkışmış reklam veya yönlendirmeler
+// Paragraf aralarına sıkışmış reklam veya yönlendirmeler
 const INLINE_JUNK_PATTERNS = [
   /^(haberi\s+görüntüle|haberin\s+devamı|devamı\s+için\s+tıkla|ilgili\s+haber)/i,
   /^(bizi\s+google\s+news|google\s+news['’]?te\s+takip|abone\s+ol|yorum\s+yaz)/i,
@@ -197,7 +197,6 @@ export function sanitizeTypographyAndMarkdown(raw: string): string {
 
   // 3. Boş ve gömülü markdown linklerini temizle
   s = s.replace(/\[\s*\]\([^\)]*\)/g, '')
-  s = s.replace(/\[([^\]]+)\]\([^\)]*\)/g, '$1')
   s = s.replace(/!\[[^\]]*\]\([^\)]*\)/g, '')
 
   // 4. Kalan markdown yıldız/altçizgi işaretlerini temizle
@@ -212,7 +211,7 @@ export function sanitizeTypographyAndMarkdown(raw: string): string {
 
 /**
  * Bir satırın ara başlık (subheading) olup olmadığını tespit eder.
- * Örn: "Bir 'Tek Adam' daha sandığa gömüldü!" veya "Tutuklandılar." (kısa ve tekil vurgu)
+ * Örn: "Bir 'Tek Adam' daha sandığa gömüldü!"
  */
 function isSubheadingCandidate(line: string, prevLine = '', nextLine = ''): boolean {
   const clean = normalizeWhitespace(line.replace(/^#+\s*/, ''))
@@ -250,93 +249,132 @@ function cleanArticleTitle(rawTitle: string): string {
 }
 
 /**
- * Ham Markdown veya metin çıktısını analiz eder:
- * - Başlığı izole eder
- * - Başlangıçtaki döviz, paylaşım, bülten gürültüsünü atar
- * - Makale bitişini (cutoff) tam zamanında yakalayıp sonrasındaki reklam/linkleri keser
- * - Ara başlıkları ve paragrafları düzenler
+ * Chrome Okuma Modu (DOM Distiller / Readability) mantığıyla metni arındırır:
+ * - Sayfa başındaki tüm borsa, menü, sosyal medya ve diğer yazarlar listesini çöpe atar.
+ * - Makalenin asıl H1 başlığına odaklanır.
+ * - Yazar adını (byline) tespit eder.
+ * - Yazının bittiği ilk anda (yazar imzası, sponsorlu reklamlar, outbrain vb.) kesintiye (cutoff) gider.
+ * - Sadece tertemiz gövde paragraflarını ve ara başlıkları bırakır.
  */
 export function cleanArticleMarkdown(rawMarkdown: string, pageUrl = ''): { title: string; text: string } {
   if (!rawMarkdown) return { title: '', text: '' }
 
-  const sanitized = sanitizeTypographyAndMarkdown(rawMarkdown)
-  const lines = sanitized
+  // 1. Jina AI başlık ve meta satırlarını yakala
+  let metaTitle = ''
+  const mTitle = rawMarkdown.match(/^Title:\s*(.+)$/m)
+  if (mTitle) {
+    metaTitle = cleanArticleTitle(mTitle[1].trim())
+  }
+
+  let workingText = rawMarkdown
+
+  // Jina'nın 'Markdown Content:' başlığından öncesini (URL Source, Published Time vb.) at
+  const mdIdx = workingText.indexOf('Markdown Content:')
+  if (mdIdx >= 0) {
+    workingText = workingText.substring(mdIdx + 17)
+  }
+
+  // 2. Makalenin Asıl H1 Başlığını Tespit Et ve Önündeki Tüm Menü/Borsa/Header Çöplerini At!
+  let detectedTitle = metaTitle
+  const h1Match = workingText.match(/(?:^|\n)#\s+([^\n]+)/)
+  if (h1Match && h1Match[1] && h1Match.index !== undefined) {
+    const candidate = cleanArticleTitle(h1Match[1].trim())
+    // Eğer başlık jenerik bir site adı ("Sözcü", "Haberler", "Son Dakika") değilse asıl makale başlığıdır
+    if (candidate.length > 3 && !/^(sözcü|haberler|anasayfa|son\s+dakika)$/i.test(candidate)) {
+      detectedTitle = candidate
+      // H1 başlığından öncesindeki TÜM site menülerini, borsa bantlarını ve logoları at!
+      workingText = workingText.substring(h1Match.index + h1Match[0].length)
+    }
+  }
+
+  // 3. Tipografiyi, yapışık markdown öğelerini ve gereksiz linkleri temizle
+  let s = workingText
+  s = s.replace(/\*\*([^*]+)\*\*([a-zA-ZçğıöşüÇĞİÖŞÜ0-9])/g, '$1 $2')
+  s = s.replace(/([a-zA-ZçğıöşüÇĞİÖŞÜ0-9])\*\*([^*]+)\*\*/g, '$1 $2')
+  s = s.replace(/;[*_]{2,6}/g, '; ')
+  s = s.replace(/([”"»)])([a-zA-ZçğıöşüÇĞİÖŞÜ])/g, '$1 $2')
+  s = s.replace(/([a-zA-ZçğıöşüÇĞİÖŞÜ])([“"«(])/g, '$1 $2')
+  s = s.replace(/\[\s*\]\([^\)]*\)/g, '')
+  s = s.replace(/!\[[^\]]*\]\([^\)]*\)/g, '')
+  s = s.replace(/(^|[^\*])\*{1,3}([^\*]+)\*{1,3}([^\*]|$)/g, '$1$2$3')
+  s = s.replace(/(^|[^_])_{1,3}([^_]+)_{1,3}([^_]|$)/g, '$1$2$3')
+  s = s.replace(/^[\*\-\•]\s+/gm, '')
+
+  const rawLines = s
     .split(/\r?\n+/)
     .map((l) => normalizeWhitespace(l))
     .filter((l) => l.length > 0)
 
-  if (lines.length === 0) return { title: '', text: '' }
-
-  // 1. Başlık Tespiti
-  let title = ''
-  let startIndex = 0
-
-  // İlk satır kısa ve temiz bir başlık niteliğinde mi?
-  const firstLine = lines[0]
-  const isFirstLineNoise = PRE_ARTICLE_NOISE_PATTERNS.some((rx) => rx.test(firstLine))
-  if (!isFirstLineNoise && firstLine.length <= 90 && firstLine.split(/\s+/).length <= 12) {
-    title = cleanArticleTitle(firstLine.replace(/^#+\s*/, ''))
-    startIndex = 1
+  if (rawLines.length === 0) {
+    return { title: detectedTitle, text: detectedTitle }
   }
 
-  // 2. Makale Başlangıç Sınırını Bul (Döviz, Sosyal Medya vb. atla)
-  let bodyStartIndex = -1
-  for (let i = startIndex; i < lines.length; i++) {
-    const line = lines[i]
-
-    // Gürültü kalıbıysa atla
-    if (PRE_ARTICLE_NOISE_PATTERNS.some((rx) => rx.test(line))) {
-      continue
+  // 4. Yazar Adını (Byline) Yakala (Başlığın hemen altındaki ilk satırlarda yer alır)
+  let authorByline = ''
+  let startIdx = 0
+  for (let i = 0; i < Math.min(3, rawLines.length); i++) {
+    const item = rawLines[i]
+    const cleanItem = item.replace(/\[([^\]]+)\]\([^\)]*\)/g, '$1').trim()
+    if (
+      cleanItem.length >= 3 &&
+      cleanItem.length <= 40 &&
+      cleanItem.split(/\s+/).length <= 4 &&
+      !/(facebook|paylaş|yayın|giriş|abone|dolar|euro|tarih|saat)/i.test(cleanItem)
+    ) {
+      authorByline = cleanItem
+      startIdx = i + 1
+      break
     }
-
-    // Kısa ve anlamsız navigasyon kırıntılarını atla
-    if (line.length < 15 && !/[.!?…]$/.test(line)) {
-      continue
-    }
-
-    // Gerçek bir cümle veya anlatı paragrafı bulundu!
-    bodyStartIndex = i
-    break
   }
 
-  if (bodyStartIndex === -1) {
-    bodyStartIndex = startIndex
-  }
-
-  // 3. Makale Gövdesini Topla ve Bitiş Sınırında (Cutoff) Dur
+  // 5. Başlık ve Yazar ile Gövde Arasındaki Gürültüyü Ele, Gövdeyi Topla ve Bitiş Sınırında (Cutoff) Dur
   const bodyParagraphs: string[] = []
-  const titleLower = title.toLowerCase()
+  let bodyStarted = false
+  const titleLower = detectedTitle.toLowerCase()
+  const noiseRegex =
+    /(mailto:|whatsapp|facebook|messenger|twitter|x['’]?te|yazıları\s+büyüt|yazıları\s+küçült|standart\s+boyut|google\s+algoritmasına|tıkla\s+ve\s+ekle|haberimizden\s+anında|bildirimleri\s+aç)/i
 
-  for (let i = bodyStartIndex; i < lines.length; i++) {
-    const line = lines[i]
-    const lineLower = line.toLowerCase()
+  for (let i = startIdx; i < rawLines.length; i++) {
+    const rawLine = rawLines[i]
+    // Markdown linkini temizle: "[Necati Doğru](https://...)" -> "Necati Doğru"
+    const line = rawLine.replace(/\[([^\]]+)\]\([^\)]*\)/g, '$1').trim()
+    const lower = line.toLowerCase()
+
+    // Henüz ana metin başlamadıysa:
+    if (!bodyStarted) {
+      if (noiseRegex.test(line)) continue
+      if (PRE_ARTICLE_NOISE_PATTERNS.some((rx) => rx.test(lower))) continue
+      // Çok kısa ve nokta ile bitmeyen buton/navigasyon satırlarını atla
+      if (line.length < 25 && !/[.!?…]$/.test(line) && line !== '★★★' && line !== '***') {
+        continue
+      }
+      bodyStarted = true
+    }
 
     // Bitiş (Cutoff) tetiklendi mi? (Yazar sonu, sponsorlu içerik, outbrain, footer)
-    if (POST_ARTICLE_CUTOFF_PATTERNS.some((rx) => rx.test(lineLower))) {
+    if (POST_ARTICLE_CUTOFF_PATTERNS.some((rx) => rx.test(lower))) {
       break
     }
 
     // Paragraf arası reklam/yönlendirme satırıysa atla
-    if (INLINE_JUNK_PATTERNS.some((rx) => rx.test(lineLower))) {
+    if (INLINE_JUNK_PATTERNS.some((rx) => rx.test(lower)) || noiseRegex.test(line)) {
       continue
     }
 
-    // Başlığın aynısı tekrar ediyorsa atla
-    if (titleLower && (lineLower === titleLower || lineLower.replace(/[^a-z0-9çğıöşü]/gi, '') === titleLower.replace(/[^a-z0-9çğıöşü]/gi, ''))) {
+    // Başlığın veya yazarın aynısı tekrar ediyorsa atla
+    if (titleLower && (lower === titleLower || lower.replace(/[^a-z0-9çğıöşü]/gi, '') === titleLower.replace(/[^a-z0-9çğıöşü]/gi, ''))) {
       continue
     }
-
-    // Çok kısa ve tek başına linkten ibaret satırları atla
-    if (line.length < 25 && /(tıkla|buradan|devamı|resmi|abone|fotoğraf)/i.test(lineLower)) {
+    if (authorByline && lower === authorByline.toLowerCase()) {
       continue
     }
 
     // Ara Başlık Kontrolü (RSVP okuyucusunda gereksiz '#' sembolü parlamaması için düz ve temiz metin olarak ekle)
     const cleanLine = line.replace(/^#+\s*/, '')
     const prev = bodyParagraphs[bodyParagraphs.length - 1] || ''
-    const next = lines[i + 1] || ''
+    const next = rawLines[i + 1] || ''
+
     if (isSubheadingCandidate(cleanLine, prev, next)) {
-      // Eğer ara başlığın sonunda noktalama yoksa duraklama ritmi için sonuna nokta ekle
       const withPunctuation = /[.!?…:;]["”’»)]*$/.test(cleanLine) ? cleanLine : `${cleanLine}.`
       bodyParagraphs.push(withPunctuation)
     } else {
@@ -344,19 +382,18 @@ export function cleanArticleMarkdown(rawMarkdown: string, pageUrl = ''): { title
     }
   }
 
-  // 4. Nihai Metni Oluştur (Başlık ve paragraflar)
+  // 6. Nihai Çıktıyı Birleştir
   const resultLines: string[] = []
-  if (title) {
-    const cleanTitleText = title.replace(/^#+\s*/, '')
-    const titleWithPunctuation = /[.!?…:;]["”’»)]*$/.test(cleanTitleText)
-      ? cleanTitleText
-      : `${cleanTitleText}.`
-    resultLines.push(titleWithPunctuation)
+  if (detectedTitle) {
+    resultLines.push(detectedTitle)
+  }
+  if (authorByline) {
+    resultLines.push(authorByline)
   }
   resultLines.push(...bodyParagraphs)
 
   return {
-    title,
+    title: detectedTitle,
     text: resultLines.join('\n\n'),
   }
 }
@@ -501,11 +538,7 @@ function extractLinesViaDomScorer(doc: Document): string[] {
     if (seen.has(normKey)) continue
     seen.add(normKey)
 
-    if (isSubheading) {
-      lines.push(`# ${text.replace(/^#+\s*/, '')}`)
-    } else {
-      lines.push(text)
-    }
+    lines.push(text)
   }
 
   return lines
@@ -599,7 +632,7 @@ export function extractArticleFromHtml(html: string, pageUrl = ''): { title: str
   }
 
   // 5. İçeriği Semantik Temizleyici (Cutoff & Süzgeç) Motorundan Geçir
-  const combinedWithTitle = cleanTitle ? `${cleanTitle}\n\n${rawContent}` : rawContent
+  const combinedWithTitle = cleanTitle ? `# ${cleanTitle}\n\n${rawContent}` : rawContent
   return cleanArticleMarkdown(combinedWithTitle, pageUrl)
 }
 
