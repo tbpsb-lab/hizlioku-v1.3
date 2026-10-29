@@ -1,4 +1,4 @@
-'use client'
+﻿'use client'
 
 import { useCallback, useEffect, useEffectEvent, useMemo, useState } from 'react'
 import { cn } from '@/lib/utils'
@@ -160,7 +160,7 @@ export function ReaderApp() {
           paddingBottom: zen ? 0 : dockHeight,
         }}
       >
-        <div className="relative flex max-h-full w-full max-w-2xl flex-col py-3">
+        <div className="relative flex max-h-full w-full max-w-4xl lg:max-w-5xl xl:max-w-6xl flex-col py-3 transition-[max-width] duration-300">
           <RsvpDisplay
             word={words[index] ?? ''}
             playing={playing}
