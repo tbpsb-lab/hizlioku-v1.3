@@ -687,9 +687,14 @@ export function extractArticleFromHtml(html: string, pageUrl = ''): { title: str
   return cleanArticleMarkdown(combinedWithTitle, pageUrl)
 }
 
-async function fetchWithTimeout(url: string, timeoutMs = 12000, options: RequestInit = {}): Promise<Response> {
+async function fetchWithTimeout(url: string, timeoutMs = 8000, options: RequestInit = {}): Promise<Response> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
+
+  if (options.signal) {
+    options.signal.addEventListener('abort', () => controller.abort(), { once: true })
+  }
+
   try {
     const res = await fetch(url, { ...options, signal: controller.signal })
     return res
@@ -699,31 +704,10 @@ async function fetchWithTimeout(url: string, timeoutMs = 12000, options: Request
 }
 
 /**
- * Jina AI Reader ile JavaScript/SPA ve korumalı sitelerden ana metni çeker (Yedek Motor)
- */
-async function fetchViaJinaReader(targetUrl: string): Promise<{ title: string; text: string } | null> {
-  try {
-    // Jina'ya reklam ve navigasyon elementlerini sunucu tarafında kaldırmasını söyle
-    const headers: Record<string, string> = {
-      Accept: 'text/plain',
-      'X-Remove-Selector': 'header, footer, nav, aside, .doviz, .finance, .share, .social, .related, .author-footer, .outbrain, .taboola, .reklam',
-    }
-
-    const res = await fetchWithTimeout(`https://r.jina.ai/${targetUrl}`, 14000, { headers })
-    if (!res.ok) return null
-    const raw = await res.text()
-    if (!raw || raw.length < 80) return null
-
-    // Jina'nın döndürdüğü metni akıllı süzgeç ve cutoff motorundan geçir
-    const cleaned = cleanArticleMarkdown(raw, targetUrl)
-    return cleaned
-  } catch {
-    return null
-  }
-}
-
-/**
- * Kullanıcıdan gelen linki CORS proxy zincirini sırayla deneyerek indirir ve ana metnini çıkarır.
+ * Çok katmanlı paralel yarıştırma motoru (Fast-Race Engine).
+ * Tüm proxy'leri (Jina, CodeTabs, CorsProxy, AllOrigins ve Direct) aynı milisaniyede paralel çalıştırır.
+ * En hızlı ve geçerli ana metin üreten ilk sonuç (genellikle 1 sn içinde) anında kazanır;
+ * yavaş kalan diğer bağlantılar otomatik iptal edilir.
  */
 export async function fetchArticleFromUrl(
   urlInput: string,
@@ -742,87 +726,130 @@ export async function fetchArticleFromUrl(
   }
 
   const targetUrl = parsedUrl.toString()
+  onStatus?.('En hızlı sunucu taranıyor ve metin çekiliyor...')
 
-  // 1. Çok katmanlı proxy denemeleri
-  const proxyAttempts: Array<{ name: string; run: () => Promise<string> }> = [
+  const globalAbort = new AbortController()
+  const encoded = encodeURIComponent(targetUrl)
+
+  // Yarışmacılar: Her biri geçerli bir ExtractedArticle döndürmek zorundadır (en az 40 kelime).
+  // Yetersiz metin veya hata durumunda Promise reject olur, böylece Promise.any kazananı seçebilir.
+  const racers: Array<{ name: string; run: () => Promise<{ title: string; text: string }> }> = [
+    // 1. Jina AI Reader (Haber sitelerinde 1 sn içinde headless render ile en temiz ve hızlı sonuç)
     {
-      name: 'AllOrigins',
+      name: 'Jina Reader',
       run: async () => {
-        onStatus?.('Haber sayfası çekiliyor (AllOrigins)...')
-        const apiUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`
-        const res = await fetchWithTimeout(apiUrl, 10000)
-        if (!res.ok) throw new Error('Status ' + res.status)
-        const data = await res.json()
-        if (data && typeof data.contents === 'string' && data.contents.length > 100) {
-          return data.contents
-        }
-        throw new Error('Boş içerik')
+        const res = await fetchWithTimeout(`https://r.jina.ai/${targetUrl}`, 6500, {
+          headers: {
+            Accept: 'text/plain',
+            'X-Remove-Selector':
+              'header, footer, nav, aside, .doviz, .finance, .share, .social, .related, .author-footer, .outbrain, .taboola, .reklam',
+          },
+          signal: globalAbort.signal,
+        })
+        if (!res.ok) throw new Error('Jina HTTP ' + res.status)
+        const raw = await res.text()
+        if (!raw || raw.length < 80) throw new Error('Jina boş içerik')
+        const cleaned = cleanArticleMarkdown(raw, targetUrl)
+        const wCount = cleaned.text.split(/\s+/).filter(Boolean).length
+        if (wCount < 40) throw new Error('Jina yetersiz metin')
+        return cleaned
       },
     },
+    // 2. CodeTabs CORS Proxy (HTML Doğrudan Ayrıştırma)
     {
-      name: 'AllOrigins Raw',
+      name: 'CodeTabs',
       run: async () => {
-        onStatus?.('Haber sayfası çekiliyor (AllOrigins Raw)...')
-        const apiUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`
-        const res = await fetchWithTimeout(apiUrl, 10000)
-        if (!res.ok) throw new Error('Status ' + res.status)
-        return await res.text()
+        const res = await fetchWithTimeout(`https://api.codetabs.com/v1/proxy?quest=${encoded}`, 5500, {
+          signal: globalAbort.signal,
+        })
+        if (!res.ok) throw new Error('CodeTabs HTTP ' + res.status)
+        const html = await res.text()
+        if (!html || html.length < 200) throw new Error('CodeTabs boş içerik')
+        const cleaned = extractArticleFromHtml(html, targetUrl)
+        const wCount = cleaned.text.split(/\s+/).filter(Boolean).length
+        if (wCount < 40) throw new Error('CodeTabs yetersiz metin')
+        return cleaned
       },
     },
+    // 3. CorsProxy.io (HTML Doğrudan Ayrıştırma)
     {
       name: 'CorsProxy',
       run: async () => {
-        onStatus?.('Haber sayfası çekiliyor (CorsProxy)...')
-        const proxyUrl = `https://corsproxy.io/?url=${encodeURIComponent(targetUrl)}`
-        const res = await fetchWithTimeout(proxyUrl, 10000)
-        if (!res.ok) throw new Error('Status ' + res.status)
-        return await res.text()
+        const res = await fetchWithTimeout(`https://corsproxy.io/?url=${encoded}`, 5500, {
+          signal: globalAbort.signal,
+        })
+        if (!res.ok) throw new Error('CorsProxy HTTP ' + res.status)
+        const html = await res.text()
+        if (!html || html.length < 200) throw new Error('CorsProxy boş içerik')
+        const cleaned = extractArticleFromHtml(html, targetUrl)
+        const wCount = cleaned.text.split(/\s+/).filter(Boolean).length
+        if (wCount < 40) throw new Error('CorsProxy yetersiz metin')
+        return cleaned
+      },
+    },
+    // 4. AllOrigins Raw (HTML Doğrudan Ayrıştırma)
+    {
+      name: 'AllOrigins',
+      run: async () => {
+        const res = await fetchWithTimeout(`https://api.allorigins.win/raw?url=${encoded}`, 6000, {
+          signal: globalAbort.signal,
+        })
+        if (!res.ok) throw new Error('AllOrigins HTTP ' + res.status)
+        const html = await res.text()
+        if (!html || html.length < 200) throw new Error('AllOrigins boş içerik')
+        const cleaned = extractArticleFromHtml(html, targetUrl)
+        const wCount = cleaned.text.split(/\s+/).filter(Boolean).length
+        if (wCount < 40) throw new Error('AllOrigins yetersiz metin')
+        return cleaned
+      },
+    },
+    // 5. Doğrudan Tarayıcı İsteği (Direct Fetch - CORS kısıtlaması olmayan sitelerde 200ms)
+    {
+      name: 'Direct',
+      run: async () => {
+        const res = await fetchWithTimeout(targetUrl, 2500, {
+          signal: globalAbort.signal,
+        })
+        if (!res.ok) throw new Error('Direct HTTP ' + res.status)
+        const html = await res.text()
+        if (!html || html.length < 200) throw new Error('Direct boş içerik')
+        const cleaned = extractArticleFromHtml(html, targetUrl)
+        const wCount = cleaned.text.split(/\s+/).filter(Boolean).length
+        if (wCount < 40) throw new Error('Direct yetersiz metin')
+        return cleaned
       },
     },
   ]
 
-  let extracted: { title: string; text: string } | null = null
-
-  // Önce doğrudan HTML proxy'lerini dene
-  for (const attempt of proxyAttempts) {
-    try {
-      const html = await attempt.run()
-      if (html && html.length > 200) {
-        onStatus?.('Sayfa analiz ediliyor ve ana metin ayıklanıyor...')
-        const res = extractArticleFromHtml(html, targetUrl)
-        const wCount = res.text.split(/\s+/).filter(Boolean).length
-        if (wCount >= 45) {
-          extracted = res
-          break
+  try {
+    // Promise.any: Yarışmacılardan en hızlı ve geçerli metin çıkaran ilk yanıt anında döner!
+    const winner = await Promise.any(
+      racers.map(async (racer) => {
+        try {
+          const res = await racer.run()
+          return { ...res, source: racer.name }
+        } catch (err) {
+          throw err
         }
-      }
-    } catch {
-      // Bir sonraki proxy'ye geç
-    }
-  }
+      }),
+    )
 
-  // Eğer HTML proxy'leri engellendiyse veya yeterli metin çıkmadıysa (< 45 kelime), Jina Reader motoruna geç
-  const currentCount = extracted?.text ? extracted.text.split(/\s+/).filter(Boolean).length : 0
-  if (currentCount < 45) {
-    onStatus?.('Okuma motoru devrede (Gereksiz detaylar ve reklamlar eleniyor)...')
-    const jinaResult = await fetchViaJinaReader(targetUrl)
-    if (jinaResult && jinaResult.text.split(/\s+/).filter(Boolean).length > currentCount) {
-      extracted = jinaResult
-    }
-  }
+    // Kazanan belirlendi; arka planda çalışan diğer yavaş proxy isteklerini derhal iptal et
+    try {
+      globalAbort.abort()
+    } catch {}
 
-  if (!extracted || !extracted.text || extracted.text.trim().length < 25) {
+    const finalWordCount = winner.text.split(/\s+/).filter(Boolean).length
+
+    return {
+      title: winner.title,
+      text: winner.text,
+      sourceUrl: targetUrl,
+      wordCount: finalWordCount,
+    }
+  } catch (allErrors: any) {
     throw new Error(
       'Bu linkten okunabilir bir makale veya haber metni çekilemedi. Site erişim engeli koymuş olabilir veya sayfa metin içermiyor olabilir.',
     )
-  }
-
-  const finalWordCount = extracted.text.split(/\s+/).filter(Boolean).length
-
-  return {
-    title: extracted.title,
-    text: extracted.text,
-    sourceUrl: targetUrl,
-    wordCount: finalWordCount,
   }
 }
