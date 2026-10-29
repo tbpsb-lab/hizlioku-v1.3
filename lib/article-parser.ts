@@ -42,11 +42,12 @@ const PRE_ARTICLE_NOISE_PATTERNS = [
 
 // Makale bitişini (Cutoff) belirleyen kalıplar (Görüldüğü an makale sona erer!)
 const POST_ARTICLE_CUTOFF_PATTERNS = [
-  // Yazar imzası / arşiv linki
-  /tüm\s+yazıları\s+için\s+tıklayın/i,
-  /yazarın\s+(diğer|tüm)\s+yazıları/i,
-  /yazar\s+hakkında/i,
-  /diğer\s+yazıları\s+için/i,
+  // Yazar imzası / arşiv linki (Karakter kodlama bozukluklarına karşı esnek)
+  /t[üu]?m\s*yaz[ıi]lar[ıi]?/i,
+  /yazar[ıi]n\s+(di[ğg]?er|t[üu]?m)\s+yaz[ıi]lar[ıi]/i,
+  /yazar\s+hakk[ıi]nda/i,
+  /di[ğg]?er\s+yaz[ıi]lar[ıi]?\s*i[çc]in/i,
+  /yaz.*t[ıi]?kla/i,
   /yazara\s+e-posta/i,
 
   // Sponsorlu reklam ağları (Outbrain, Taboola, RejuvaCare, Otto vb.)
@@ -351,7 +352,13 @@ export function cleanArticleMarkdown(rawMarkdown: string, pageUrl = ''): { title
       bodyStarted = true
     }
 
-    // Bitiş (Cutoff) tetiklendi mi? (Yazar sonu, sponsorlu içerik, outbrain, footer)
+    // Bitiş (Cutoff) tetiklendi mi?
+    // 1. Yazar adı ve yazı kelimesi geçiyorsa (Örn: "Necati Doğru Tüm yazıları için tıklayın")
+    if (authorByline && lower.includes(authorByline.toLowerCase()) && lower.includes('yaz')) {
+      break
+    }
+
+    // 2. Sponsorlu içerik, outbrain, footer veya arşiv kalıpları
     if (POST_ARTICLE_CUTOFF_PATTERNS.some((rx) => rx.test(lower))) {
       break
     }
